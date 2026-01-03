@@ -4,6 +4,7 @@ import pickle
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
@@ -17,11 +18,15 @@ def get_authenticated_service():
         with open(token_file, "rb") as f:
             creds = pickle.load(f)
 
-    # If no valid creds, go OAuth flow
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
-        creds = flow.run_local_server(port=0)
+    # 🔒 HARD RULE: NEVER START OAUTH ON SERVER
+    if not creds:
+        raise RuntimeError(
+            "YouTube OAuth token missing. "
+            "Run OAuth locally and copy youtube_token.pkl to the server."
+        )
 
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
         with open(token_file, "wb") as f:
             pickle.dump(creds, f)
 

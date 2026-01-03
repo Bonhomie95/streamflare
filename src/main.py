@@ -168,6 +168,11 @@ def main() -> None:
     print("🎬 Rendered base:", rr.output_path)
 
     # 2) Generate subtitles from the rendered short (timestamps match!)
+    if os.getenv("ENABLE_SUBTITLES", "true").lower() == "true":
+        transcribe_to_srt(out_path, srt_path)
+    else:
+        print("🚫 Subtitles disabled by config")
+
     if not os.path.exists(srt_path):
         print("📝 Generating subtitles...")
     transcribe_to_srt(out_path, srt_path)

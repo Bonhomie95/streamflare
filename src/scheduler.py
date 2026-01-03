@@ -8,6 +8,7 @@ from .main import main as run_once
 
 def run_scheduler():
     s = get_settings()
+
     interval_hours = int(
         getattr(s, "upload_interval_hours", None)
         or int(__import__("os").getenv("UPLOAD_INTERVAL_HOURS", "15"))
@@ -26,7 +27,7 @@ def run_scheduler():
         try:
             run_once()
             print("✅ Run completed successfully")
-        except Exception as e:
+        except Exception:
             print("❌ Run failed:")
             traceback.print_exc()
 
@@ -37,3 +38,8 @@ def run_scheduler():
 
         print(f"🕒 Next run in {sleep_for / 3600:.2f} hours\n")
         time.sleep(sleep_for)
+
+
+# 🔥 THIS IS WHAT WAS MISSING
+if __name__ == "__main__":
+    run_scheduler()
