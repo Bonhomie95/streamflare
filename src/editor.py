@@ -50,7 +50,7 @@ def render_shorts(
         sub_file = _ffmpeg_escape_path(subtitles_path)
         vf += (
             f";{map_label}subtitles='{sub_file}':"
-            "force_style='Fontsize=48,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,Outline=2,Alignment=2'[vs]"
+            "force_style='Fontsize=14,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,Outline=2,Alignment=2'[vs]"
         )
         map_label = "[vs]"
 

@@ -27,6 +27,7 @@ class Settings:
 
     logo_path: str
     subscribe_path: str
+    interval_hours: int
 
 
 def _split_csv(value: str) -> list[str]:
@@ -71,4 +72,5 @@ def get_settings() -> Settings:
         logs_dir=logs_dir,
         logo_path=os.path.join(assets_dir, "logo.png"),
         subscribe_path=os.path.join(assets_dir, "subscribe.png"),
+        interval_hours=int(os.getenv("UPLOAD_INTERVAL_HOURS", "15")),
     )
