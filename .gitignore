@@ -25,6 +25,13 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.mp4
+.mp3
+.srt
+client_secrets.json
+logo.png
+subscribe.png
+youtube_token.pkl
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
