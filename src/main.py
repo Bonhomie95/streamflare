@@ -1,5 +1,6 @@
 # src/main.py
 import os
+from typing import Any, Dict, List, Optional
 
 from .config import get_settings
 from .twitch_client import TwitchClient
@@ -8,7 +9,7 @@ from .downloader import download_twitch_vod, download_twitch_clip
 from .highlight_picker import pick_best_highlight
 from .editor import render_shorts
 from .utils import read_json, write_json, safe_filename, sha1, utc_ts
-from .clip_ranker import pick_best_clip
+from .clip_ranker import score_clip  # ✅ use score_clip so we can skip used clips
 from .subtitles import transcribe_to_srt
 from .youtube_uploader import upload_video
 
@@ -19,11 +20,6 @@ MODE = os.getenv("TWITCH_MODE", "vods").lower()
 def build_title_and_description(
     brand: str, broadcaster: str, vod_title: str, game_name: str
 ) -> tuple[str, str, list[str]]:
-    """
-    Not-random metadata:
-    - Title uses Twitch title + broadcaster + game + #shorts
-    - Description includes creator + game + brand + hashtags
-    """
     game = game_name.strip() if game_name else "Twitch"
     base_title = vod_title.strip() if vod_title else f"{broadcaster} Highlight"
     title = f"{base_title} | {broadcaster} ({game}) #shorts"
@@ -43,6 +39,35 @@ def build_title_and_description(
     return title, desc, hashtags
 
 
+def _load_state(state_path: str) -> Dict[str, Any]:
+    return read_json(
+        state_path,
+        default={
+            "last_index": -1,
+            "used_vods": [],
+            "used_clips": [],
+            "updated_at": None,
+        },
+    )
+
+
+def _save_state(state_path: str, state: Dict[str, Any]) -> None:
+    state["updated_at"] = utc_ts()
+    write_json(state_path, state)
+
+
+def _pick_best_unused_clip(
+    clips: List[Dict[str, Any]], used_clip_ids: set[str]
+) -> Optional[Dict[str, Any]]:
+    # rank by your formula: views × duration weight × recency weight
+    ranked = sorted(clips, key=score_clip, reverse=True)
+    for c in ranked:
+        cid = c.get("id")
+        if cid and cid not in used_clip_ids:
+            return c
+    return None
+
+
 def main() -> None:
     s = get_settings()
 
@@ -59,7 +84,7 @@ def main() -> None:
         raise FileNotFoundError(f"Missing subscribe icon: {s.subscribe_path}")
 
     state_path = os.path.join(s.cache_dir, "state.json")
-    read_json(state_path, default={})  # ensure exists
+    state = _load_state(state_path)
 
     # -----------------------
     # Round-robin broadcaster
@@ -74,45 +99,62 @@ def main() -> None:
     print(f"⚙️ Mode: {MODE.upper()}")
 
     # -----------------------
-    # Source selection
+    # Shared variables
     # -----------------------
-    vod_id = ""
-    vod_title = ""
-    vod_url = ""
+    source_id = ""
+    source_title = ""
+    source_url = ""
     game_name = ""
+
+    dl = None
+    highlight_start = 0.0
+    highlight_duration = 0.0
+    highlight_score = 0.0
 
     # =====================================================
     # 🎬 CLIPS MODE
     # =====================================================
     if MODE == "clips":
         lookback_hours = int(os.getenv("CLIPS_LOOKBACK_HOURS", "48"))
+
         clips = twitch.get_top_clips(
             broadcaster_id=broadcaster_id,
             lookback_hours=lookback_hours,
-            limit=10,
+            limit=20,  # ✅ a bit more so we can skip used clips
         )
 
         if not clips:
             print("❌ No clips found.")
             return
 
-        clip = pick_best_clip(clips)
-        vod_id = clip["id"]
-        vod_title = clip.get("title", "")
-        vod_url = clip["url"]
-        game_name = clip.get("game_name", "")
+        used_clips = set(state.get("used_clips", []))
+        clip = _pick_best_unused_clip(clips, used_clips)
 
-        print(f"🔥 Clip: {vod_title}")
-        print(f"🔗 URL: {vod_url}")
+        if not clip:
+            print("🚫 All fetched clips have already been used — skipping this cycle.")
+            return
 
-        dl = download_twitch_clip(vod_url, out_dir=s.vod_dir)
+        source_id = str(clip.get("id", ""))
+        source_title = str(clip.get("title", ""))
+        source_url = str(clip.get("url", ""))
+        game_name = str(clip.get("game_name", ""))
+
+        print(f"🔥 Clip: {source_title}")
+        print(f"🔗 URL: {source_url}")
+
+        dl = download_twitch_clip(source_url, out_dir=s.vod_dir)
         print("✅ Downloaded clip:", dl.vod_path)
 
         highlight_start = 0.0
         highlight_duration = min(
             float(clip.get("duration", 60.0)), float(s.highlight_max_sec)
         )
-        highlight_score = 1.0  # clips already curated
+        highlight_score = float(score_clip(clip))
+
+        # ✅ mark clip as used immediately (prevents repeats even if later steps crash)
+        used_clips.add(source_id)
+        state["used_clips"] = list(used_clips)[-150:]
+        _save_state(state_path, state)
 
     # =====================================================
     # 📼 VODS MODE
@@ -121,22 +163,23 @@ def main() -> None:
         vods = twitch.get_latest_vods(broadcaster_id, limit=5)
         vod = choose_vod(vods, state_path=state_path)
 
+        # ✅ choose_vod now returns None when everything was used
         if not vod:
-            print("❌ No VOD found.")
+            print("🚫 No unused VOD found — skipping this cycle.")
             return
 
-        vod_id = vod.get("id", "")
-        vod_title = vod.get("title", "")
-        vod_url = vod.get("url", "")
-        game_id = vod.get("game_id", "")
+        source_id = str(vod.get("id", ""))
+        source_title = str(vod.get("title", ""))
+        source_url = str(vod.get("url", ""))
+        game_id = str(vod.get("game_id", ""))
 
         game = twitch.get_game(game_id) if game_id else {}
-        game_name = game.get("name", "")
+        game_name = str(game.get("name", ""))
 
-        print(f"📼 VOD: {vod_title}")
-        print(f"🔗 URL: {vod_url}")
+        print(f"📼 VOD: {source_title}")
+        print(f"🔗 URL: {source_url}")
 
-        dl = download_twitch_vod(vod_url, out_dir=s.vod_dir, prefer_height=720)
+        dl = download_twitch_vod(source_url, out_dir=s.vod_dir, prefer_height=720)
         print("✅ Downloaded:", dl.vod_path)
 
         wav_cache = os.path.join(s.audio_dir, f"{sha1(dl.vod_path)}.wav")
@@ -157,11 +200,15 @@ def main() -> None:
             f"score={highlight_score:.3f}"
         )
 
-    # -----------------------
-    # Render paths (cache key)
-    # -----------------------
+    if dl is None:
+        print("❌ Internal error: download result is missing.")
+        return
+
+    # =====================================================
+    # 🎞️ Render paths (cache key)
+    # =====================================================
     render_key = sha1(f"{dl.vod_path}|{highlight_start:.1f}|{highlight_duration:.1f}")
-    out_name = safe_filename(f"{broadcaster_name}_{vod_id}_{render_key}.mp4")
+    out_name = safe_filename(f"{broadcaster_name}_{source_id}_{render_key}.mp4")
     out_path = os.path.join(s.renders_dir, out_name)
     srt_path = out_path.replace(".mp4", ".srt")
 
@@ -178,21 +225,21 @@ def main() -> None:
             duration_sec=highlight_duration,
             logo_path=s.logo_path,
             subscribe_path=s.subscribe_path,
-            subtitles_path=None,  # base first
+            subtitles_path=None,
         )
         print("🎬 Rendered base:", rr.output_path)
 
     print("🎬 Base render path:", out_path)
 
     # =====================================================
-    # 📝 2) Generate subtitles (ONLY IF ENABLED + ONLY ONCE)
+    # 📝 2) Generate subtitles (optional)
     # =====================================================
     subtitles_ready = False
     if os.getenv("ENABLE_SUBTITLES", "true").lower() == "true":
         if not os.path.exists(srt_path):
             print("📝 Generating subtitles...")
             try:
-                transcribe_to_srt(out_path, srt_path)
+                transcribe_to_srt(out_path, srt_path)  # ✅ transcribe the final short
             except Exception as e:
                 print("⚠️ Subtitle generation failed:", e)
 
@@ -205,13 +252,13 @@ def main() -> None:
         print("🚫 Subtitles disabled by config")
 
     # =====================================================
-    # 🔥 3) Burn subtitles ONLY IF subtitles_ready
+    # 🔥 3) Burn subtitles ONLY IF ready
     # =====================================================
     if subtitles_ready:
         out_subbed = out_path.replace(".mp4", "_subbed.mp4")
+
         if not os.path.exists(out_subbed):
             print("🔥 Burning subtitles...")
-
             rr2 = render_shorts(
                 input_path=dl.vod_path,
                 output_path=out_subbed,
@@ -223,7 +270,6 @@ def main() -> None:
             )
             print("✅ Subbed render:", rr2.output_path)
 
-        # Replace original with subbed version atomically
         if os.path.exists(out_subbed):
             os.replace(out_subbed, out_path)
             print("♻️ Replaced base with subbed:", out_path)
@@ -236,7 +282,7 @@ def main() -> None:
     title, desc, tags = build_title_and_description(
         brand=s.brand_name,
         broadcaster=broadcaster_name,
-        vod_title=vod_title,
+        vod_title=source_title,
         game_name=game_name,
     )
 
@@ -245,9 +291,9 @@ def main() -> None:
         "mode": MODE,
         "broadcaster_id": broadcaster_id,
         "broadcaster_name": broadcaster_name,
-        "source_id": vod_id,
-        "source_title": vod_title,
-        "source_url": vod_url,
+        "source_id": source_id,
+        "source_title": source_title,
+        "source_url": source_url,
         "game_name": game_name,
         "highlight": {
             "start_sec": highlight_start,
@@ -274,13 +320,10 @@ def main() -> None:
         title=title,
         description=desc,
         tags=tags,
-        privacy="public",  # or "unlisted" / "private"
+        privacy="public",
     )
     print("🎉 Uploaded to YouTube:", resp.get("id"))
 
-    print("\n🧾 YouTube Metadata")
-    print("Title:", title)
-    print("Description preview:", desc[:160].replace("\n", " "), "...")
     print("\n✅ DONE")
     print("🎞️ Render:", out_path)
     print("📄 Meta:", meta_path)
